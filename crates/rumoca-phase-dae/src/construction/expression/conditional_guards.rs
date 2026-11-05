@@ -133,6 +133,11 @@ pub(in crate::construction) fn retains_parameter_guard(
     {
         return false;
     }
+    // Experimental: hosts that set any parameter at run time and only need the
+    // residuals, without structural analysis, can keep every such branch.
+    if std::env::var_os("RUMOCA_RETAIN_PARAMETER_BRANCHES").is_some() {
+        return true;
+    }
     let incidence = |arm: &Expression| {
         let mut scan = ArmScan::incidence(classes.unknown);
         rumoca_core::ExpressionVisitor::visit_expression(&mut scan, arm);
