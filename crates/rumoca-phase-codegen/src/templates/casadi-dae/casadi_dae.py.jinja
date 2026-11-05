@@ -1,0 +1,443 @@
+{#- A checked DAE as CasADi MX expressions, residuals and all: see README.md. -#}
+{% macro binder_name(domain, ordinal) -%}b{{ domain }}_{{ ordinal }}{%- endmacro %}
+
+{% macro coordinate(c, provenance) -%}
+{%- if c.kind in ["parameter", "input", "state", "algebraic", "discrete_real", "discrete_value"] -%}v[{{ c.id }}]
+{%- elif c.kind == "derivative" -%}d[{{ c.id }}]
+{%- elif c.kind in ["pre_discrete_real", "pre_discrete_value"] -%}v[{{ c.id }}]
+{%- elif c.kind == "time" -%}t
+{%- elif c.kind == "delay" -%}delayed[{{ c.id }}]
+{%- elif c.kind == "binder" -%}{{ binder_name(c.domain, c.ordinal) }}
+{%- elif c.kind == "function_parameter" -%}p{{ c.function }}_{{ c.ordinal }}
+{%- else -%}{{ fail_at("unsupported-feature:casadi-dae-coordinate:" ~ c.kind, provenance) }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro subscript(s) -%}
+{%- if s.kind == "whole" -%}None
+{%- elif s.kind in ["index", "slice"] -%}{{ expr(s.expression) }}
+{%- else -%}{{ fail_at("unsupported-feature:casadi-dae-subscript:" ~ s.kind, s.provenance) }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro expression_list(ids) -%}
+{%- for id in ids -%}{{ expr(id) }}{% if not loop.last %}, {% endif %}{%- endfor -%}
+{%- endmacro %}
+
+{% macro binder_loops(domain) -%}
+{%- for binder in dae.domains[domain].domain.binders %} for {{ binder_name(domain, loop.index0) }} in _range({{ binder.lower }}, {{ binder.step }}, {{ binder.upper }}){% endfor -%}
+{%- endmacro %}
+
+{% macro expr(id) -%}
+{%- set e = dae.expressions[id] -%}
+{%- set op = e.operation -%}
+{%- if op.kind == "literal" -%}
+  {%- if op.value.real is defined -%}{{ op.value.real }}
+  {%- elif op.value.integer is defined -%}{{ op.value.integer }}
+  {%- elif op.value.enumeration is defined -%}{{ op.value.enumeration }}
+  {%- elif op.value.boolean is defined -%}{{ "True" if op.value.boolean else "False" }}
+  {%- else -%}{{ fail_at("unsupported-feature:casadi-dae-literal", e.provenance) }}
+  {%- endif -%}
+{%- elif op.kind == "coordinate" -%}{{ coordinate(op.coordinate, e.provenance) }}
+{%- elif op.kind == "unary" -%}
+  {%- if op.operator == "plus" -%}_array({{ expr(op.operand) }})
+  {%- elif op.operator == "negate" -%}(-_array({{ expr(op.operand) }}))
+  {%- elif op.operator == "not" -%}_not({{ expr(op.operand) }})
+  {%- else -%}{{ fail_at("unsupported-feature:casadi-dae-unary-operator:" ~ op.operator, e.provenance) }}
+  {%- endif -%}
+{%- elif op.kind == "binary" -%}_{{ op.operator }}({{ expr(op.lhs) }}, {{ expr(op.rhs) }})
+{%- elif op.kind == "conditional" -%}
+  {%- for ordinal in range(0, op.operands | length - 1, 2) -%}_if({{ expr(op.operands[ordinal]) }}, {{ expr(op.operands[ordinal + 1]) }}, {% endfor -%}
+  {{ expr(op.operands[op.operands | length - 1]) }}
+  {%- for ordinal in range(0, op.operands | length - 1, 2) -%}){%- endfor -%}
+{%- elif op.kind == "array" -%}_array([{{ expression_list(op.elements) }}])
+{%- elif op.kind == "range" -%}_range({{ op.start.value }}, {{ op.explicit_step.value if op.explicit_step is not none else 1 }}, {{ op.stop.value }})
+{%- elif op.kind == "comprehension" -%}_array([{{ expr(op.body) }}{{ binder_loops(op.domain) }}])
+{%- elif op.kind == "index" -%}_index({{ expr(op.base) }}{% for item in op.subscripts %}, {{ subscript(item) }}{% endfor %})
+{%- elif op.kind == "builtin" -%}_b_{{ op.builtin }}({{ expression_list(op.arguments) }})
+{%- elif op.kind == "call" -%}f{{ op.function }}({{ expression_list(op.arguments) }})[{{ op.output }}]
+{%- elif op.kind == "function_value" -%}L[{{ op.value }}]
+{%- else -%}{{ fail_at("unsupported-feature:casadi-dae-expression:" ~ op.kind, e.provenance) }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro function_statement(function, statement, depth) -%}
+{%- set pad = "    " * depth -%}
+{%- if statement.kind == "assignment" -%}
+  {%- set definition = function.definitions[statement.definition] -%}
+{{ pad }}L[{{ definition.target }}] = {{ expr(definition.rhs) }}
+{%- elif statement.kind == "assignment_group" -%}
+  {%- for nested in statement.statements %}{{ function_statement(function, nested, depth) }}{% if not loop.last %}
+{% endif %}{% endfor %}
+{%- elif statement.kind == "assertion" -%}
+{{ pad }}pass
+{%- elif statement.kind == "conditional" -%}
+{{ pad }}base{{ statement.ordinal }} = dict(L)
+{{ pad }}conditions{{ statement.ordinal }} = []
+{{ pad }}branches{{ statement.ordinal }} = []
+{%- for branch in statement.branches %}
+{{ pad }}L = dict(base{{ statement.ordinal }})
+{{ pad }}conditions{{ statement.ordinal }}.append({{ expr(branch.condition) }})
+{%- for nested in branch.statements %}
+{{ function_statement(function, nested, depth) }}
+{%- endfor %}
+{{ pad }}branches{{ statement.ordinal }}.append(L)
+{%- endfor %}
+{{ pad }}L = dict(base{{ statement.ordinal }})
+{%- for nested in statement.fallback %}
+{{ function_statement(function, nested, depth) }}
+{%- endfor %}
+{{ pad }}L = _merge(conditions{{ statement.ordinal }}, branches{{ statement.ordinal }}, L)
+{%- else -%}
+{{ fail_at("unsupported-feature:casadi-dae-function-statement:" ~ statement.kind, statement.provenance) }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro equation_owner(owner, target) -%}
+{%- if owner.kind == "residual" -%}
+{{ target }}.append({{ expr(owner.residual) }})
+{%- elif owner.kind == "structured" -%}
+{%- set ns = namespace(array_bodies=true) -%}
+{%- for body in owner.bodies %}{% if dae.expressions[body].value_type.dimensions | length == 0 %}{% set ns.array_bodies = false %}{% endif %}{% endfor -%}
+{%- if ns.array_bodies -%}
+{%- for body in owner.bodies %}{{ target }}.append({{ expr(body) }}){% if not loop.last %}
+{% endif %}{% endfor -%}
+{%- else -%}
+{%- for body in owner.bodies %}{{ target }}.extend([{{ expr(body) }}{{ binder_loops(owner.domain) }}]){% if not loop.last %}
+{% endif %}{% endfor -%}
+{%- endif -%}
+{%- else -%}
+{{ fail_at("unsupported-feature:casadi-dae-equation-owner:" ~ owner.kind, owner.provenance) }}
+{%- endif -%}
+{%- endmacro %}
+
+{% macro attribute(name, id) -%}{%- if id is not none %}        "{{ name }}": {{ expr(id) }},
+{% endif -%}{%- endmacro %}
+"""CasADi DAE of {{ model_name }}, generated by Rumoca's casadi-dae target."""
+import functools
+import math
+import operator
+
+import casadi as ca
+import numpy as np
+
+
+def _is_number(x):
+    return isinstance(x, (bool, int, float, np.integer, np.floating))
+
+
+def _array(x):
+    """An array literal as a vector, or as a matrix when its elements are vectors (rows)."""
+    if not isinstance(x, list):
+        return x
+    if not x:
+        return ca.DM(0, 1)
+    if all(_is_number(e) or ca.MX(e).is_scalar() for e in x):
+        return ca.vertcat(*x)
+    return ca.vertcat(*[ca.transpose(ca.MX(_array(e))) for e in x])
+
+
+def _range(start, step, stop):
+    """The elements of start:step:stop (MLS 10.4.3), as a list of Python numbers."""
+    return list(range(start, stop + (1 if step > 0 else -1), step))
+
+
+def _integer(x):
+    if isinstance(x, (ca.MX, ca.DM)):
+        return int(round(float(_evaluate(x))))
+    return int(round(x))
+
+
+# Bindings of the parameters, for what must be known structurally, such as a subscript
+_structural = {"symbols": [], "values": []}
+
+
+def _evaluate(x):
+    x = ca.MX(x)
+    for _ in range(100):
+        if not ca.symvar(x):
+            break
+        x = ca.substitute([x], _structural["symbols"], _structural["values"])[0]
+    return ca.evalf(x)
+
+
+def _subscript(sub, extent):
+    if sub is None:
+        return slice(None)
+    if isinstance(sub, list):
+        return [_integer(i) - 1 for i in sub]
+    return _integer(sub) - 1
+
+
+def _index(x, *subs):
+    x = _array(x)
+    if not isinstance(x, (ca.MX, ca.DM)):
+        x = ca.MX(x)
+    if len(subs) == 1:
+        row = _subscript(subs[0], x.size1())
+        return x[row, :] if x.size2() == 1 or isinstance(row, slice) else ca.transpose(x[row, :])
+    if len(subs) == 2:
+        return x[_subscript(subs[0], x.size1()), _subscript(subs[1], x.size2())]
+    raise NotImplementedError("subscripts of more than two dimensions")
+
+
+def _is_scalar(x):
+    return _is_number(x) or x.is_scalar()
+
+
+def _add(a, b):
+    return _array(a) + _array(b)
+
+
+def _subtract(a, b):
+    return _array(a) - _array(b)
+
+
+_elementwise_add = _add
+_elementwise_subtract = _subtract
+
+
+def _multiply(a, b):
+    a, b = _array(a), _array(b)
+    if _is_scalar(a) or _is_scalar(b):
+        return a * b
+    if a.is_column() and b.is_column():
+        return ca.dot(a, b)
+    if a.is_column():
+        return ca.transpose(ca.mtimes(ca.transpose(a), b))
+    return ca.mtimes(a, b)
+
+
+def _elementwise_multiply(a, b):
+    return _array(a) * _array(b)
+
+
+def _divide(a, b):
+    return _array(a) / _array(b)
+
+
+_elementwise_divide = _divide
+
+
+def _power(a, b):
+    return _array(a) ** _array(b)
+
+
+_elementwise_power = _power
+
+
+def _equal(a, b):
+    return a == b
+
+
+def _not_equal(a, b):
+    return a != b
+
+
+def _less(a, b):
+    return a < b
+
+
+def _less_equal(a, b):
+    return a <= b
+
+
+def _greater(a, b):
+    return a > b
+
+
+def _greater_equal(a, b):
+    return a >= b
+
+
+def _and(a, b):
+    return (a and b) if _is_number(a) and _is_number(b) else ca.logic_and(a, b)
+
+
+def _or(a, b):
+    return (a or b) if _is_number(a) and _is_number(b) else ca.logic_or(a, b)
+
+
+def _not(a):
+    return (not a) if _is_number(a) else ca.logic_not(a)
+
+
+def _if(condition, then_value, else_value):
+    if _is_number(condition):
+        return then_value if condition else else_value
+    return ca.if_else(condition, _array(then_value), _array(else_value), True)
+
+
+def _mx(x):
+    return ca.MX(_array(x))
+
+
+def _merge(conditions, branches, fallback):
+    """The local values after a conditional statement: a symbolic condition cannot pick a branch."""
+    merged = dict(fallback)
+    for condition, branch in zip(reversed(conditions), reversed(branches)):
+        for key, value in branch.items():
+            if key in merged:
+                merged[key] = _if(condition, value, merged[key])
+            else:
+                merged[key] = value
+    return merged
+
+
+_b_abs = lambda x: ca.fabs(_array(x))
+_b_sign = lambda x: ca.sign(_array(x))
+_b_sqrt = lambda x: ca.sqrt(_array(x))
+_b_sin = lambda x: ca.sin(_array(x))
+_b_cos = lambda x: ca.cos(_array(x))
+_b_tan = lambda x: ca.tan(_array(x))
+_b_asin = lambda x: ca.asin(_array(x))
+_b_acos = lambda x: ca.acos(_array(x))
+_b_atan = lambda x: ca.atan(_array(x))
+_b_atan2 = lambda y, x: ca.atan2(_array(y), _array(x))
+_b_sinh = lambda x: ca.sinh(_array(x))
+_b_cosh = lambda x: ca.cosh(_array(x))
+_b_tanh = lambda x: ca.tanh(_array(x))
+_b_exp = lambda x: ca.exp(_array(x))
+_b_log = lambda x: ca.log(_array(x))
+_b_log10 = lambda x: ca.log10(_array(x))
+_b_floor = lambda x: ca.floor(_array(x))
+_b_ceil = lambda x: ca.ceil(_array(x))
+_b_integer = lambda x: ca.floor(_array(x))
+_b_div = lambda x, y: ca.sign(_array(x) / y) * ca.floor(ca.fabs(_array(x) / y))
+_b_mod = lambda x, y: _array(x) - ca.floor(_array(x) / y) * y
+_b_rem = lambda x, y: _array(x) - _b_div(x, y) * y
+_b_smooth = lambda order, x: x
+_b_no_event = lambda x: x
+_b_homotopy = lambda actual, simplified: actual
+_b_transpose = lambda x: ca.transpose(_array(x))
+_b_cross = lambda a, b: ca.cross(_array(a), _array(b))
+_b_identity = lambda n: ca.DM.eye(_integer(n))
+_b_vector = lambda x: ca.vec(_array(x))
+_b_diagonal = lambda x: ca.diag(_array(x))
+_b_linspace = lambda a, b, n: ca.linspace(a, b, _integer(n))
+_b_size = lambda x, dim: _mx(x).shape[_integer(dim) - 1]
+
+
+def _b_min(*args):
+    if len(args) == 2:
+        return ca.fmin(_array(args[0]), _array(args[1]))
+    return ca.mmin(_mx(args[0]))
+
+
+def _b_max(*args):
+    if len(args) == 2:
+        return ca.fmax(_array(args[0]), _array(args[1]))
+    return ca.mmax(_mx(args[0]))
+
+
+def _b_sum(x):
+    return ca.sum1(ca.vec(_mx(x)))
+
+
+def _b_product(x):
+    return functools.reduce(operator.mul, ca.vertsplit(ca.vec(_mx(x))), 1)
+
+
+def _b_zeros(*dims):
+    return ca.DM.zeros(*[_integer(n) for n in dims])
+
+
+def _b_ones(*dims):
+    return ca.DM.ones(*[_integer(n) for n in dims])
+
+
+def _b_fill(value, *dims):
+    return _array(value) * ca.DM.ones(*[_integer(n) for n in dims])
+
+
+def _b_promoted_cat1(*args):
+    return ca.vertcat(*[_array(a) for a in args])
+
+
+def _b_promoted_cat2(*args):
+    return ca.horzcat(*[_array(a) for a in args])
+
+{% for function in dae.functions %}
+
+def f{{ function.id }}({% for parameter in function.parameters %}p{{ function.id }}_{{ loop.index0 }}{% if not loop.last %}, {% endif %}{% endfor %}):
+    # {{ function.name }}
+    L = {}
+{%- for statement in function.statements %}
+{{ function_statement(function, statement, 1) }}
+{%- endfor %}
+    return [L[i] for i in {{ function.values | selectattr("role", "equalto", "output") | map(attribute="ordinal") | list | tojson }}]
+{% endfor %}
+
+def _symbol(name, dimensions):
+    if len(dimensions) > 2:
+        raise NotImplementedError(f"{name} has more than two dimensions")
+    return ca.MX.sym(name, *dimensions) if dimensions else ca.MX.sym(name)
+
+
+def build():
+    """Return time, the variables with their attributes, residuals and delays of the model."""
+    t = ca.MX.sym("time")
+    v = {}
+    d = {}
+    delayed = {}
+{% for variable in dae.variables %}{% set ty = dae.value_types[variable.value_type_id].value_type %}{% if ty.scalar != "string" %}
+    v[{{ loop.index0 }}] = _symbol({{ variable.name | tojson }}, {{ ty.dimensions | list | tojson }})
+{%- if variable.role == "state" %}
+    d[{{ loop.index0 }}] = _symbol("der(" + {{ variable.name | tojson }} + ")", {{ ty.dimensions | list | tojson }})
+{%- endif %}{% endif %}{% endfor %}
+{% for delay in dae.systems.temporal.delays %}
+    delayed[{{ delay.id }}] = _symbol("delay{{ delay.id }}", {{ delay.value_type.dimensions | list | tojson }})
+{%- endfor %}
+
+    # Parameter bindings first: they may be needed to evaluate a subscript below
+{% for variable in dae.variables %}{% set ty = dae.value_types[variable.value_type_id].value_type %}{% if ty.scalar != "string" and variable.role in ["parameter", "constant"] and variable.attributes.binding is not none %}
+    _structural["symbols"].append(v[{{ loop.index0 }}])
+    _structural["values"].append(ca.MX(_array({{ expr(variable.attributes.binding) }})))
+{%- endif %}{% endfor %}
+
+    variables = []
+{% for variable in dae.variables %}{% set ty = dae.value_types[variable.value_type_id].value_type %}{% set a = variable.attributes %}
+    variables.append({
+        "name": {{ variable.name | tojson }},
+        "role": {{ variable.role | tojson }},
+        "scalar": {{ ty.scalar | tojson }},
+        "causality": {{ a.causality | tojson }},
+{%- if ty.scalar != "string" %}
+        "symbol": v[{{ loop.index0 }}],
+{%- if variable.role == "state" %}
+        "derivative": d[{{ loop.index0 }}],
+{%- endif %}
+{%- endif %}
+        "fixed": {{ "None" if a.fixed is none else ("True" if a.fixed else "False") }},
+{%- if ty.scalar != "string" %}
+{{ attribute("binding", a.binding) }}{{ attribute("start", a.start) }}{{ attribute("min", a.minimum) }}{{ attribute("max", a.maximum) }}{{ attribute("nominal", a.nominal) }}
+{%- endif %}
+    })
+{%- endfor %}
+
+    equations = []
+{% for owner in dae.systems.continuous.owners %}
+    {{ equation_owner(owner, "equations") | indent(4) }}
+{%- endfor %}
+
+    initial_equations = []
+{% for owner in dae.systems.initialization.owners %}
+    {{ equation_owner(owner, "initial_equations") | indent(4) }}
+{%- endfor %}
+
+    delays = []
+{% for delay in dae.systems.temporal.delays %}
+    delays.append({
+        "symbol": delayed[{{ delay.id }}],
+        "expression": {{ expr(delay.source) }},
+        "duration": {% if delay.operation.parameter_delay is defined %}{{ expr(delay.operation.parameter_delay.delay_time.expression) }}{% else %}{{ expr(delay.operation.bounded_delay.delay_time) }}{% endif %},
+    })
+{%- endfor %}
+
+    return {
+        "time": t,
+        "variables": variables,
+        "equations": equations,
+        "initial_equations": initial_equations,
+        "delays": delays,
+    }

@@ -1,0 +1,16 @@
+version = 1
+ir = "dae"
+name = "casadi-dae"
+description = "CasADi MX residuals of the checked DAE, with variables and attributes"
+readiness_level = 1
+execution_mode = "symbolic"
+deployment_class = "symbolic"
+
+[capabilities]
+runtime_events = false
+structured_equation_families = true
+external_functions = false
+
+[[files]]
+path = "{{ model_name }}_casadi_dae.py"
+template = "casadi_dae.py.jinja"
