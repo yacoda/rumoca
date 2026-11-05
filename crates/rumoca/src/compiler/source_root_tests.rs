@@ -58,3 +58,63 @@ fn source_roots_close_cycles_and_skip_unreferenced_roots() {
         result.err()
     );
 }
+
+/// A library may be referred to only by a sibling file of the compiled file.
+#[test]
+fn source_roots_follow_references_of_sibling_files() {
+    let temp = tempdir().unwrap();
+    let library = temp.path().join("lib").join("Lib");
+    let models = temp.path().join("models");
+    fs::create_dir_all(&library).unwrap();
+    fs::create_dir_all(&models).unwrap();
+    fs::write(
+        library.join("package.mo"),
+        "package Lib model Level Real H; equation H = 1; end Level; end Lib;",
+    )
+    .unwrap();
+    fs::write(models.join("Base.mo"), "model Base Lib.Level L; end Base;").unwrap();
+    let top = models.join("Top.mo");
+    fs::write(&top, "model Top extends Base; end Top;").unwrap();
+
+    let result = Compiler::new()
+        .model("Top")
+        .source_root(&temp.path().join("lib").to_string_lossy())
+        .compile_file(&top.to_string_lossy());
+    assert!(
+        result.is_ok(),
+        "library used by a sibling: {:?}",
+        result.err()
+    );
+}
+
+/// A Base Modelica export repeats the class name of the model next to it, and
+/// neither of the two depends on the other.
+#[test]
+fn base_modelica_exports_are_not_siblings() {
+    let temp = tempdir().unwrap();
+    let source = temp.path().join("M.mo");
+    let export = temp.path().join("M.basemodelica.mo");
+    fs::write(&source, "model M Real x; equation x = 1; end M;").unwrap();
+    fs::write(
+        &export,
+        "package 'M' model 'M' Real 'x'; equation 'x' = 1; end 'M'; end 'M';",
+    )
+    .unwrap();
+
+    let from_source = Compiler::new()
+        .model("M")
+        .compile_file(&source.to_string_lossy());
+    assert!(
+        from_source.is_ok(),
+        "source next to export: {:?}",
+        from_source.err()
+    );
+    let from_export = Compiler::new()
+        .model("'M'.'M'")
+        .compile_file(&export.to_string_lossy());
+    assert!(
+        from_export.is_ok(),
+        "export next to source: {:?}",
+        from_export.err()
+    );
+}
