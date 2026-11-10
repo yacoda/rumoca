@@ -79,6 +79,21 @@ initial equation
 end Fixed;
 "#;
 
+/// An array with a value for all its elements, and a protected variable.
+const EACH_MODEL: &str = "Each";
+const EACH_SOURCE: &str = r#"
+model Each
+  Real a[2](each start = 1, each nominal = 2);
+  Real b[2](start = {1, 2});
+protected
+  Real h;
+equation
+  der(a) = -b;
+  der(b) = a;
+  h = a[1];
+end Each;
+"#;
+
 /// A compiled smoke model plus the name the CLI would render it under.
 struct Fixture {
     model_name: &'static str,
@@ -263,6 +278,29 @@ fn modelica_targets_print_the_value_of_fixed() {
                 "{target} must print `{expected}`:\n{text}"
             );
         }
+/// The Base Modelica grammar has neither `each` in a modification nor a
+/// `protected` section (MCP-0031, grammar.md, B25 and B22).
+#[test]
+fn base_modelica_has_no_each_and_no_protected_section() {
+    let fixture = compile_fixture(EACH_MODEL, EACH_SOURCE);
+    let files = render_target_files(&fixture.compiled, fixture.model_name, "base-modelica", None)
+        .unwrap_or_else(|error| panic!("base-modelica must render: {error:#}"));
+    let text = &files[0].content;
+    for expected in [
+        "start = fill(1, 2), nominal = fill(2, 2)",
+        "start = {1, 2}",
+        "Real h",
+    ] {
+        assert!(
+            text.contains(expected),
+            "base-modelica must print `{expected}`:\n{text}"
+        );
+    }
+    for rejected in ["each ", "protected"] {
+        assert!(
+            !text.contains(rejected),
+            "base-modelica must not print `{rejected}`:\n{text}"
+        );
     }
 }
 
