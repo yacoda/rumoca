@@ -7,7 +7,7 @@ execution_mode = "symbolic"
 deployment_class = "symbolic"
 
 [capabilities]
-runtime_events = false
+runtime_events = true
 structured_equation_families = true
 external_functions = false
 
