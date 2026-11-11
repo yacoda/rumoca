@@ -46,6 +46,7 @@ fn retained(then: Expression, otherwise: Expression) -> bool {
         &GuardClasses {
             tunable_parameter: &parameter,
             unknown: &unknown,
+            every_guard: false,
         },
     )
 }
@@ -161,6 +162,7 @@ fn retained_input(model: &flat::Model) -> bool {
     retains_flat_guard(
         model,
         &Default::default(),
+        false,
         &[(
             reference("enabled", "i", a),
             reference("component.x", "i", a),

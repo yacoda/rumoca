@@ -306,6 +306,8 @@ pub struct Compiler {
     source_root_paths: Vec<String>,
     /// Enable verbose output.
     verbose: bool,
+    /// Keep every parameter guard of an equation as a run-time branch.
+    retain_parameter_guards: bool,
 }
 
 impl Compiler {
@@ -324,6 +326,22 @@ impl Compiler {
     pub fn model(mut self, name: &str) -> Self {
         self.model_name = Some(name.to_string());
         self
+    }
+
+    /// Keep an equation conditional whose guard reads a tunable parameter as a
+    /// run-time branch also where its arms read different unknowns by value
+    /// but differentiate the same ones; such an arm is otherwise selected at
+    /// translation (SPEC_0040 DAE-C22).
+    pub fn retain_parameter_guards(mut self, retain: bool) -> Self {
+        self.retain_parameter_guards = retain;
+        self
+    }
+
+    fn session_config(&self) -> SessionConfig {
+        SessionConfig {
+            retain_parameter_guards: self.retain_parameter_guards,
+            ..SessionConfig::default()
+        }
     }
 
     /// Enable or disable verbose output.
@@ -553,7 +571,7 @@ impl Compiler {
             eprintln!("[rumoca] Source file: {}", file_name);
         }
 
-        let mut session = Session::new(SessionConfig::default());
+        let mut session = Session::new(self.session_config());
         self.load_required_source_roots(&mut session, source)?;
 
         if self.verbose {
@@ -616,7 +634,7 @@ impl Compiler {
             eprintln!("[rumoca] Phase 1: Parsing (no source roots, no resolution)...");
         }
 
-        let mut session = Session::new(SessionConfig::default());
+        let mut session = Session::new(self.session_config());
         let parse_error = session.update_document(file_name, source);
         if let Some(message) = parse_error {
             let Some((diagnostics, source_map)) =
@@ -655,7 +673,7 @@ impl Compiler {
             eprintln!("[rumoca] Phase 1-5: Parsing, resolving, and flattening...");
         }
 
-        let mut session = Session::new(SessionConfig::default());
+        let mut session = Session::new(self.session_config());
         self.load_required_source_roots(&mut session, source)?;
         self.load_local_compile_unit(&mut session, source, file_name)?;
         // A sibling file may be the only one referring to a source root.
@@ -683,7 +701,7 @@ impl Compiler {
             eprintln!("[rumoca] Source file: {}", file_name);
         }
 
-        let mut session = Session::new(SessionConfig::default());
+        let mut session = Session::new(self.session_config());
         self.load_required_source_roots(&mut session, source)?;
 
         if self.verbose {
@@ -1288,6 +1306,35 @@ mod tests {
                 && warnings[0].contains("GuardKinds.mo:11"),
             "{warnings:?}"
         );
+    }
+
+    /// `retain_parameter_guards` keeps a guard whose arms read different
+    /// unknowns by value, which SPEC_0040 DAE-C22 would select at translation,
+    /// but not one whose arms differentiate different unknowns.
+    #[test]
+    fn retained_parameter_guards_keep_arms_with_the_same_derivatives() {
+        let conditionals = |equation: &str, retain: bool| {
+            let source = format!(
+                "model GuardKept\n  parameter Boolean useB = true;\n  \
+                 Real x(start = 1, fixed = true);\n  Real b(start = 1, fixed = true);\n\
+                 equation\n  der(b) = -b;\n  {equation}\nend GuardKept;\n"
+            );
+            let result = Compiler::new()
+                .model("GuardKept")
+                .retain_parameter_guards(retain)
+                .compile_str(&source, "GuardKept.mo")
+                .expect("compile");
+            result
+                .to_json()
+                .expect("DAE JSON")
+                .matches("\"conditional\"")
+                .count()
+        };
+        let by_value = "der(x) = if useB then -x else -b;";
+        assert_eq!(conditionals(by_value, false), 0);
+        assert_eq!(conditionals(by_value, true), 1);
+        let by_derivative = "0 = if useB then der(x) + x else x - b;";
+        assert_eq!(conditionals(by_derivative, true), 0);
     }
 
     /// SPEC_0040 DAE-C22: a call argument a declared output dimension of the

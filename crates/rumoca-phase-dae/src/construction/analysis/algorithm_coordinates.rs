@@ -10,6 +10,7 @@ use rumoca_core::{ComponentReference, FallibleExpressionRewriter, FallibleStatem
 /// resolved to declared storage coordinates. Borrowed when no change is needed.
 pub(in crate::construction) fn prepared_flat(
     flat: &flat::Model,
+    options: crate::ToDaeOptions,
 ) -> Result<std::borrow::Cow<'_, flat::Model>, ToDaeError> {
     let carrying = model_algorithm_loops::has_carrying_loops(flat);
     if !carrying && !has_decidable_conditionals(flat) {
@@ -17,7 +18,7 @@ pub(in crate::construction) fn prepared_flat(
     }
     let constants = constant_context(flat)?;
     let evaluable = evaluable_parameters(flat);
-    let shapes = FunctionShapeAnalysis::analyze_model(flat, &constants, Some(&evaluable))?;
+    let shapes = FunctionShapeAnalysis::analyze_model(flat, &constants, Some(&evaluable), options)?;
     let unrolled =
         model_algorithm_loops::unroll_carrying_algorithm_loops(flat, shapes.model_values())?;
     resolve_algorithm_coordinates(select_structural_branches(unrolled, shapes.model_values()))
