@@ -278,22 +278,42 @@ fn fmi_targets_render_the_checked_continuous_fixture() {
 #[test]
 fn modelica_targets_print_the_value_of_fixed() {
     let fixture = compile_fixture(FIXED_MODEL, FIXED_SOURCE);
-    for target in ["flat-modelica", "base-modelica"] {
+    // Base Modelica has no `each` and puts array dimensions after the name.
+    let cases = [
+        (
+            "flat-modelica",
+            [
+                "u(fixed = false);",
+                "x(start = 1, fixed = false);",
+                "a(each start = 1, each fixed = false);",
+                "b(start = {1, 2}, fixed = {true, false});",
+                "p(start = 2, fixed = false);",
+            ],
+        ),
+        (
+            "base-modelica",
+            [
+                "u(fixed = false);",
+                "x(start = 1, fixed = false);",
+                "a[2](start = fill(1, 2), fixed = fill(false, 2));",
+                "b[2](start = {1, 2}, fixed = {true, false});",
+                "p(start = 2, fixed = false);",
+            ],
+        ),
+    ];
+    for (target, expectations) in cases {
         let files = render_target_files(&fixture.compiled, fixture.model_name, target, None)
             .unwrap_or_else(|error| panic!("{target} must render: {error:#}"));
         let text = &files[0].content;
-        for expected in [
-            "u(fixed = false);",
-            "x(start = 1, fixed = false);",
-            "a(each start = 1, each fixed = false);",
-            "b(start = {1, 2}, fixed = {true, false});",
-            "p(start = 2, fixed = false);",
-        ] {
+        for expected in expectations {
             assert!(
                 text.contains(expected),
                 "{target} must print `{expected}`:\n{text}"
             );
         }
+    }
+}
+
 /// The Base Modelica grammar has neither `each` in a modification nor a
 /// `protected` section (MCP-0031, grammar.md, B25 and B22).
 #[test]
@@ -307,6 +327,19 @@ fn base_modelica_has_no_each_and_no_protected_section() {
         "start = {1, 2}",
         "Real h",
     ] {
+        assert!(
+            text.contains(expected),
+            "base-modelica must print `{expected}`:\n{text}"
+        );
+    }
+    for rejected in ["each ", "protected"] {
+        assert!(
+            !text.contains(rejected),
+            "base-modelica must not print `{rejected}`:\n{text}"
+        );
+    }
+}
+
 /// Base Modelica has one place for array dimensions, after the component name:
 /// the component clause takes none after the type (MCP-0031, grammar.md, B24).
 #[test]
@@ -319,12 +352,6 @@ fn base_modelica_puts_array_dimensions_after_the_name() {
         assert!(
             text.contains(expected),
             "base-modelica must print `{expected}`:\n{text}"
-        );
-    }
-    for rejected in ["each ", "protected"] {
-        assert!(
-            !text.contains(rejected),
-            "base-modelica must not print `{rejected}`:\n{text}"
         );
     }
     assert!(
